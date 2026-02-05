@@ -240,7 +240,7 @@ def _fill_trainval_infos(nusc,
             pose_record_next = nusc.get('ego_pose', sd_rec_next['ego_pose_token'])
         else:
             pose_record_next = None
-
+        # 这里是用的lidar_token，拿到的就是lidar坐标系下的坐标，不然后边不可能和cur_next直接运算，这也就对应了B2D中gt_box为什么要转到lidar坐标系下
         lidar_path, boxes, _ = nusc.get_sample_data(lidar_token)
 
         mmcv.check_file_exist(lidar_path)
@@ -319,10 +319,12 @@ def _fill_trainval_infos(nusc,
                 nusc.get('sample_annotation', token)
                 for token in sample['anns']
             ]
-            locs = np.array([b.center for b in boxes]).reshape(-1, 3)
+            locs = np.array([b.center for b in boxes]).reshape(-1, 3) # agent相对于lidar的偏移
             dims = np.array([b.wlh for b in boxes]).reshape(-1, 3)
+            # 同样这里拿到的是lidar坐标系下的旋转角，agent车头相对于雷达x轴正方向的夹角
             rots = np.array([b.orientation.yaw_pitch_roll[0]
                              for b in boxes]).reshape(-1, 1)
+
             velocity = np.array(
                 [nusc.box_velocity(token)[:2] for token in sample['anns']])
             valid_flag = np.array(
@@ -341,7 +343,11 @@ def _fill_trainval_infos(nusc,
                 if names[i] in NuScenesDataset.NameMapping:
                     names[i] = NuScenesDataset.NameMapping[names[i]]
             names = np.array(names)
-            # we need to convert rot to SECOND format.
+            # we need to convert rot to SECOND format. ？？？这个second也是很老的代码了，这里可能有历史遗留问题。
+            # 虽然这个形式和从lidar坐标系变到了camera坐标系很像，但不应该是这样。
+            # 注意这里的航向角和自车那个旋转角度不一样，自车的yaw是自车车头和世界坐标系x轴的夹角。
+            # 而这里的航向角是agent相对于ego lidar坐标系的旋转角度，取反再减90度只是变了个形式
+            # 模型使用的就是这个作为监督信号，这个影响最后模型输出的结果如何可视化，最终模型输出的结果也要变回来才能可视化
             gt_boxes = np.concatenate([locs, dims, -rots - np.pi / 2], axis=1)
             assert len(gt_boxes) == len(
                 annotations), f'{len(gt_boxes)}, {len(annotations)}'
@@ -353,20 +359,24 @@ def _fill_trainval_infos(nusc,
             gt_fut_yaw = np.zeros((num_box, fut_ts))
             gt_fut_masks = np.zeros((num_box, fut_ts))
             gt_boxes_yaw = -(gt_boxes[:,6] + np.pi / 2)
-            # agent lcf feat (x, y, yaw, vx, vy, width, length, height, type)
+            # agent lcf feat (x, y, yaw, vx, vy, width, length, height, type) agent的current status（在lidar坐标系观测）
             agent_lcf_feat = np.zeros((num_box, 9))
             gt_fut_goal = np.zeros((num_box))
             for i, anno in enumerate(annotations):
                 cur_box = boxes[i]
                 cur_anno = anno
-                agent_lcf_feat[i, 0:2] = cur_box.center[:2]	
-                agent_lcf_feat[i, 2] = gt_boxes_yaw[i]
-                agent_lcf_feat[i, 3:5] = velocity[i]
-                agent_lcf_feat[i, 5:8] = anno['size'] # width,length,height
+                agent_lcf_feat[i, 0:2] = cur_box.center[:2]	# lidar坐标系，自车的偏移
+                agent_lcf_feat[i, 2] = gt_boxes_yaw[i] # agent车头相对于lidar坐标系x轴正方向的夹角
+                agent_lcf_feat[i, 3:5] = velocity[i] # lidar坐标系
+                agent_lcf_feat[i, 5:8] = anno['size'] # width,length,height lidar坐标系
                 agent_lcf_feat[i, 8] = cat2idx[anno['category_name']] if anno['category_name'] in cat2idx.keys() else -1
                 for j in range(fut_ts):
                     if cur_anno['next'] != '':
                         anno_next = nusc.get('sample_annotation', cur_anno['next'])
+
+                        # 这里使用的是nusc.get拿到的是全局坐标系下的，所以cur_box和cur_next一开始是不在同一个坐标系下的，
+                        # 所以下边需要把cur_next转到lidar坐标系下和cur_box算差值！
+
                         box_next = Box(
                             anno_next['translation'], anno_next['size'], Quaternion(anno_next['rotation'])
                         )
@@ -383,7 +393,7 @@ def _fill_trainval_infos(nusc,
                                                       cur_box.orientation.z, cur_box.orientation.w])
                         _, _, box_yaw_next = quart_to_rpy([box_next.orientation.x, box_next.orientation.y,
                                                            box_next.orientation.z, box_next.orientation.w])
-                        gt_fut_yaw[i, j] = box_yaw_next - box_yaw
+                        gt_fut_yaw[i, j] = box_yaw_next - box_yaw # lidar坐标系下的角度变化
                         cur_anno = anno_next
                         cur_box = box_next
                     else:
@@ -396,9 +406,9 @@ def _fill_trainval_infos(nusc,
                     gt_fut_goal[i] = 9
                 else:
                     box_mot_yaw = np.arctan2(coord_diff[1], coord_diff[0]) + np.pi
-                    gt_fut_goal[i] = box_mot_yaw // (np.pi / 4)  # 0-8: goal direction class
+                    gt_fut_goal[i] = box_mot_yaw // (np.pi / 4)  # 0-8: goal direction class lidar坐标系
 
-            # get ego history traj (offset format)
+            # get ego history traj (offset format) 先在global
             ego_his_trajs = np.zeros((his_ts+1, 3))
             ego_his_trajs_diff = np.zeros((his_ts+1, 3))
             sample_cur = sample
@@ -415,19 +425,19 @@ def _fill_trainval_infos(nusc,
                     sample_cur = nusc.get('sample', sample_cur['prev']) if has_prev else None
                 else:
                     ego_his_trajs[i] = ego_his_trajs[i+1] - ego_his_trajs_diff[i+1]
-                    ego_his_trajs_diff[i] = ego_his_trajs_diff[i+1]
+                    ego_his_trajs_diff[i] = ego_his_trajs_diff[i+1] # 没有使用，后续直接用的lidar坐标系下的位移差
             
-            # global to ego at lcf
+            # global to ego at lcf 转到ego
             ego_his_trajs = ego_his_trajs - np.array(pose_record['translation'])
             rot_mat = Quaternion(pose_record['rotation']).inverse.rotation_matrix
             ego_his_trajs = np.dot(rot_mat, ego_his_trajs.T).T
-            # ego to lidar at lcf
+            # ego to lidar at lcf 转到lidar
             ego_his_trajs = ego_his_trajs - np.array(cs_record['translation'])
             rot_mat = Quaternion(cs_record['rotation']).inverse.rotation_matrix
             ego_his_trajs = np.dot(rot_mat, ego_his_trajs.T).T
             ego_his_trajs = ego_his_trajs[1:] - ego_his_trajs[:-1]
 
-            # get ego futute traj (offset format)
+            # get ego futute traj (offset format) 同上history
             ego_fut_trajs = np.zeros((fut_ts+1, 3))
             ego_fut_masks = np.zeros((fut_ts+1))
             sample_cur = sample
@@ -464,7 +474,7 @@ def _fill_trainval_infos(nusc,
             _, _, ego_yaw = quart_to_rpy(pose_record['rotation'])
             ego_pos = np.array(pose_record['translation'])
             if pose_record_prev is not None:
-                _, _, ego_yaw_prev = quart_to_rpy(pose_record_prev['rotation'])
+                _, _, ego_yaw_prev = quart_to_rpy(pose_record_prev['rotation']) # ego2global
                 ego_pos_prev = np.array(pose_record_prev['translation'])
             if pose_record_next is not None:
                 _, _, ego_yaw_next = quart_to_rpy(pose_record_next['rotation'])
@@ -473,12 +483,12 @@ def _fill_trainval_infos(nusc,
             if pose_record_prev is not None:
                 ego_w = (ego_yaw - ego_yaw_prev) / 0.5
                 ego_v = np.linalg.norm(ego_pos[:2] - ego_pos_prev[:2]) / 0.5
+                # 原始的航向角yaw是自车坐标系下相对于全局坐标系x轴的夹角，这里计算出的速度是正北和正东的分量，这里取名为vx,vy很容易让人混淆
                 ego_vx, ego_vy = ego_v * math.cos(ego_yaw + np.pi/2), ego_v * math.sin(ego_yaw + np.pi/2)
             else:
-                ego_w = (ego_yaw_next - ego_yaw) / 0.5
+                ego_w = (ego_yaw_next - ego_yaw) / 0.5 # 0.5s是采样时间间隔，相当于角速度，可以看出来计算的也是相对于正东方向转动的角速度
                 ego_v = np.linalg.norm(ego_pos_next[:2] - ego_pos[:2]) / 0.5
                 ego_vx, ego_vy = ego_v * math.cos(ego_yaw + np.pi/2), ego_v * math.sin(ego_yaw + np.pi/2)
-
             ref_scene = nusc.get("scene", sample['scene_token'])
             try:
                 pose_msgs = nusc_can_bus.get_messages(ref_scene['name'],'pose')
@@ -504,15 +514,15 @@ def _fill_trainval_infos(nusc,
                 delta_y = ego_his_trajs[-1, 1] + ego_fut_trajs[0, 1]
                 v0 = np.sqrt(delta_x**2 + delta_y**2)
                 Kappa = 0
+            # ego的速度是自车速度沿着正北和正东方向进行了分解，这个和agent要转到lidar坐标系下不一致
+            ego_lcf_feat[:2] = np.array([ego_vx, ego_vy]) #can_bus[13:15] 这里其实是用了pos估算出来的速度，没有用can_bus总线采集的速度，怀疑可能是说以pose为准，而不是以can_bus为准
+            ego_lcf_feat[2:4] = can_bus[7:9] # ax, ay, 角速度直接沿用了can_bus中的，是IMU（与自车载体坐标系相同）坐标系下三个轴的加速度
+            ego_lcf_feat[4] = ego_w #can_bus[12] yaw角速度
+            ego_lcf_feat[5:7] = np.array([ego_length, ego_width]) # 车长，车宽，采用默认好的固定值
+            ego_lcf_feat[7] = v0 # 初始速度，标量
+            ego_lcf_feat[8] = Kappa # 曲率，标量
 
-            ego_lcf_feat[:2] = np.array([ego_vx, ego_vy]) #can_bus[13:15]
-            ego_lcf_feat[2:4] = can_bus[7:9]
-            ego_lcf_feat[4] = ego_w #can_bus[12]
-            ego_lcf_feat[5:7] = np.array([ego_length, ego_width])
-            ego_lcf_feat[7] = v0
-            ego_lcf_feat[8] = Kappa
-
-            info['gt_boxes'] = gt_boxes
+            info['gt_boxes'] = gt_boxes # x, y z, w, l, h, yaw，全都是lidar坐标系下的！
             info['gt_names'] = names
             info['gt_velocity'] = velocity.reshape(-1, 2)
             info['num_lidar_pts'] = np.array(
@@ -520,16 +530,18 @@ def _fill_trainval_infos(nusc,
             info['num_radar_pts'] = np.array(
                 [a['num_radar_pts'] for a in annotations])
             info['valid_flag'] = valid_flag
-            info['gt_agent_fut_trajs'] = gt_fut_trajs.reshape(-1, fut_ts*2).astype(np.float32)
-            info['gt_agent_fut_masks'] = gt_fut_masks.reshape(-1, fut_ts).astype(np.float32)
-            info['gt_agent_lcf_feat'] = agent_lcf_feat.astype(np.float32)
-            info['gt_agent_fut_yaw'] = gt_fut_yaw.astype(np.float32)
-            info['gt_agent_fut_goal'] = gt_fut_goal.astype(np.float32)
-            info['gt_ego_his_trajs'] = ego_his_trajs[:, :2].astype(np.float32)
-            info['gt_ego_fut_trajs'] = ego_fut_trajs[:, :2].astype(np.float32)
-            info['gt_ego_fut_masks'] = ego_fut_masks[1:].astype(np.float32)
-            info['gt_ego_fut_cmd'] = command.astype(np.float32)
-            info['gt_ego_lcf_feat'] = ego_lcf_feat.astype(np.float32)
+            # 以下是自车以外agent bbox外的一些信息，但是训练过程中好像只用了fut_trajs!
+            info['gt_agent_fut_trajs'] = gt_fut_trajs.reshape(-1, fut_ts*2).astype(np.float32) # gt未来轨迹，差值形式，lidar坐标系下
+            info['gt_agent_fut_masks'] = gt_fut_masks.reshape(-1, fut_ts).astype(np.float32) # gt未来轨迹的mask，
+            info['gt_agent_lcf_feat'] = agent_lcf_feat.astype(np.float32) # 自车以外的agent的信息，x, y, agent车头与lidar x轴的夹角，lidar坐标系下的速度，w, l, h，class
+            info['gt_agent_fut_yaw'] = gt_fut_yaw.astype(np.float32) # lidar坐标系下观测到的未来6个点的航向角的差值，表示角度变化
+            info['gt_agent_fut_goal'] = gt_fut_goal.astype(np.float32) # lidar坐标系下的未来目标点方向，9个类别
+            # 以下是自车
+            info['gt_ego_his_trajs'] = ego_his_trajs[:, :2].astype(np.float32) # lidar坐标系下的历史2个点坐标点差值
+            info['gt_ego_fut_trajs'] = ego_fut_trajs[:, :2].astype(np.float32) # 未来6点坐标点差值
+            info['gt_ego_fut_masks'] = ego_fut_masks[1:].astype(np.float32) # mask
+            info['gt_ego_fut_cmd'] = command.astype(np.float32) # lidar坐标下，未来6点（3s）的行驶方向
+            info['gt_ego_lcf_feat'] = ego_lcf_feat.astype(np.float32) # global下的正北正东方向速度，IMU三轴加速度，相对于正东方向yaw角的变化速度，固定的车长车宽，初始线性速度，曲率
 
         if sample['scene_token'] in train_scenes:
             train_nusc_infos.append(info)
@@ -594,13 +606,13 @@ def obtain_sensor2top(nusc,
         'data_path': data_path,
         'type': sensor_type,
         'sample_data_token': sd_rec['token'],
-        'sensor2ego_translation': cs_record['translation'],
+        'sensor2ego_translation': cs_record['translation'], # vector angel ego -> sensor, observe in ego
         'sensor2ego_rotation': cs_record['rotation'],
-        'ego2global_translation': pose_record['translation'],
+        'ego2global_translation': pose_record['translation'], # vector angel global -> ego, observe in global
         'ego2global_rotation': pose_record['rotation'],
         'timestamp': sd_rec['timestamp']
     }
-
+    # ego -> sensor
     l2e_r_s = sweep['sensor2ego_rotation']
     l2e_t_s = sweep['sensor2ego_translation']
     e2g_r_s = sweep['ego2global_rotation']
@@ -611,13 +623,13 @@ def obtain_sensor2top(nusc,
     l2e_r_s_mat = Quaternion(l2e_r_s).rotation_matrix
     e2g_r_s_mat = Quaternion(e2g_r_s).rotation_matrix
     R = (l2e_r_s_mat.T @ e2g_r_s_mat.T) @ (
-        np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T)
+        np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T) # sensor2lidar
     T = (l2e_t_s @ e2g_r_s_mat.T + e2g_t_s) @ (
         np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T)
     T -= e2g_t @ (np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T
                   ) + l2e_t @ np.linalg.inv(l2e_r_mat).T
     sweep['sensor2lidar_rotation'] = R.T  # points @ R.T + T
-    sweep['sensor2lidar_translation'] = T
+    sweep['sensor2lidar_translation'] = T # sensor原点在lidar坐标系下的坐标
     return sweep
 
 

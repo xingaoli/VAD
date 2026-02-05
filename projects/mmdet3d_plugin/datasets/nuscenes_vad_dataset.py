@@ -1380,7 +1380,7 @@ class VADCustomNuScenesDataset(NuScenesDataset):
             patch_angle += 360
         can_bus[-2] = patch_angle / 180 * np.pi
         can_bus[-1] = patch_angle
-
+        # 上边can总线更新后的can_bus里实际存的：全局偏移旋转量, IMU加速度，角速度，正北正东速度分量，弧度制yaw，角度制yaw
         lidar2ego = np.eye(4)
         lidar2ego[:3,:3] = Quaternion(input_dict['lidar2ego_rotation']).rotation_matrix
         lidar2ego[:3, 3] = input_dict['lidar2ego_translation']
@@ -1854,6 +1854,7 @@ def output_to_nusc_box(detection):
     box_yaw = box3d.yaw.numpy()
     # TODO: check whether this is necessary
     # with dir_offset & dir_limit in the head
+    # 还记得convert_nuscenes的bbox yaw时将gt的yaw角度取反再减90度，所以这里如果要返回原始的nuscenes gt同样取反减90度即可。
     box_yaw = -box_yaw - np.pi / 2
 
     box_list = []

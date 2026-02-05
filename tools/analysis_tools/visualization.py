@@ -33,6 +33,8 @@ cams = ['CAM_FRONT',
  'CAM_BACK_LEFT',
  'CAM_FRONT_LEFT']
 
+MAPCLASSES = ['divider', 'ped_crossing', 'boundary']
+
 
 def render_annotation(
         anntoken: str,
@@ -93,7 +95,7 @@ def render_annotation(
         cam = select_cams[i - 1]
         data_path, boxes, camera_intrinsic = nusc.get_sample_data(cam, selected_anntokens=[anntoken])
         im = Image.open(data_path)
-        axes[i].imshow(im)
+        # axes[i].imshow(im)
         axes[i].set_title(nusc.get('sample_data', cam)['channel'])
         axes[i].axis('off')
         axes[i].set_aspect('equal')
@@ -259,63 +261,6 @@ def get_predicted_data(sample_data_token: str,
     return data_path, box_list, cam_intrinsic
 
 
-def lidiar_render(sample_token, data, out_path=None, out_name=None, traj_use_perstep_offset=True):
-    bbox_gt_list = []
-    bbox_pred_list = []
-    sample_rec = nusc.get('sample', sample_token)
-    anns = sample_rec['anns']
-    sd_record = nusc.get('sample_data', sample_rec['data']['LIDAR_TOP'])
-    cs_record = nusc.get('calibrated_sensor', sd_record['calibrated_sensor_token'])
-    pose_record = nusc.get('ego_pose', sd_record['ego_pose_token'])
-
-    for ann in anns:
-        content = nusc.get('sample_annotation', ann)
-        gt_fut_trajs, gt_fut_masks = get_gt_fut_trajs(
-            nusc=nusc, anno=content, cs_record=cs_record, 
-            pose_record=pose_record, fut_ts=6
-        )
-        try:
-            bbox_gt_list.append(CustomDetectionBox(
-                sample_token=content['sample_token'],
-                translation=tuple(content['translation']),
-                size=tuple(content['size']),
-                rotation=tuple(content['rotation']),
-                velocity=nusc.box_velocity(content['token'])[:2],
-                fut_trajs=tuple(gt_fut_trajs),
-                ego_translation=(0.0, 0.0, 0.0) if 'ego_translation' not in content
-                else tuple(content['ego_translation']),
-                num_pts=-1 if 'num_pts' not in content else int(content['num_pts']),
-                detection_name=category_to_detection_name(content['category_name']),
-                detection_score=-1.0 if 'detection_score' not in content else float(content['detection_score']),
-                attribute_name=''))
-        except:
-            pass
-
-    bbox_anns = data['results'][sample_token]
-    for content in bbox_anns:
-        bbox_pred_list.append(CustomDetectionBox(
-            sample_token=content['sample_token'],
-            translation=tuple(content['translation']),
-            size=tuple(content['size']),
-            rotation=tuple(content['rotation']),
-            velocity=tuple(content['velocity']),
-            fut_trajs=tuple(content['fut_traj']),
-            ego_translation=(0.0, 0.0, 0.0) if 'ego_translation' not in content
-            else tuple(content['ego_translation']),
-            num_pts=-1 if 'num_pts' not in content else int(content['num_pts']),
-            detection_name=content['detection_name'],
-            detection_score=-1.0 if 'detection_score' not in content else float(content['detection_score']),
-            attribute_name=content['attribute_name']))
-    gt_annotations = EvalBoxes()
-    pred_annotations = EvalBoxes()
-    gt_annotations.add_boxes(sample_token, bbox_gt_list)
-    pred_annotations.add_boxes(sample_token, bbox_pred_list)
-    # print('green is ground truth')
-    # print('blue is the predited result')
-    visualize_sample(nusc, sample_token, gt_annotations, pred_annotations,
-                     savepath=out_path, traj_use_perstep_offset=traj_use_perstep_offset, pred_data=data)
-
-
 def get_color(category_name: str):
     """
     Provides the default colors based on the category names.
@@ -389,7 +334,7 @@ def get_gt_fut_trajs(nusc: NuScenes,
     #  Move box to sensor coord system.
     box.translate(-np.array(cs_record['translation']))
     box.rotate(Quaternion(cs_record['rotation']).inverse)
-    
+
     # get future trajectory coords for each box
     gt_fut_trajs = np.zeros((fut_ts, 2))  # [fut_ts*2]
     gt_fut_masks = np.zeros((fut_ts))  # [fut_ts]
@@ -416,13 +361,13 @@ def get_gt_fut_trajs(nusc: NuScenes,
         else:
             # gt_fut_trajs[i:] = gt_fut_trajs[i-1]
             gt_fut_trajs[i:] = 0
-            break         
+            break
 
     return gt_fut_trajs.reshape(-1).tolist(), gt_fut_masks.reshape(-1).tolist()
 
 def get_gt_vec_maps(
     sample_token,
-    data_root='data/nuscenes/',
+    data_root='data/nuscenes_mini/nuscenes_mini',
     pc_range=[-15.0, -30.0, -4.0, 15.0, 30.0, 4.0],
     padding_value=-10000,
     map_classes=['divider', 'ped_crossing', 'boundary'],
@@ -455,7 +400,7 @@ def get_gt_vec_maps(
     patch_size = (patch_h, patch_w)
 
     vector_map = VectorizedLocalMap(data_root, patch_size=patch_size,
-                                    map_classes=map_classes, 
+                                    map_classes=map_classes,
                                     fixed_ptsnum_per_line=map_fixed_ptsnum_per_line,
                                     padding_value=padding_value)
 
@@ -463,7 +408,7 @@ def get_gt_vec_maps(
     anns_results = vector_map.gen_vectorized_samples(
         map_location, lidar2global_translation, lidar2global_rotation
     )
-    
+
     '''
     anns_results, type: dict
         'gt_vecs_pts_loc': list[num_vecs], vec with num_points*2 coordinates
@@ -479,133 +424,8 @@ def get_gt_vec_maps(
             gt_vecs_pts_loc = gt_vecs_pts_loc.flatten(1).to(dtype=torch.float32)
         except:
             gt_vecs_pts_loc = gt_vecs_pts_loc
-    
+
     return gt_vecs_pts_loc, gt_vecs_label
-
-
-def visualize_sample(nusc: NuScenes,
-                     sample_token: str,
-                     gt_boxes: EvalBoxes,
-                     pred_boxes: EvalBoxes,
-                     nsweeps: int = 1,
-                     conf_th: float = 0.4,
-                     pc_range: list = [-30.0, -30.0, -4.0, 30.0, 30.0, 4.0],
-                     verbose: bool = True,
-                     savepath: str = None,
-                     traj_use_perstep_offset: bool = True,
-                     data_root='data/nuscenes/',
-                     map_pc_range: list = [-15.0, -30.0, -4.0, 15.0, 30.0, 4.0],
-                     padding_value=-10000,
-                     map_classes=['divider', 'ped_crossing', 'boundary'],
-                     map_fixed_ptsnum_per_line=20,
-                     gt_format=['fixed_num_pts'],
-                     colors_plt = ['cornflowerblue', 'royalblue', 'slategrey'],
-                     pred_data = None) -> None:
-    """
-    Visualizes a sample from BEV with annotations and detection results.
-    :param nusc: NuScenes object.
-    :param sample_token: The nuScenes sample token.
-    :param gt_boxes: Ground truth boxes grouped by sample.
-    :param pred_boxes: Prediction grouped by sample.
-    :param nsweeps: Number of sweeps used for lidar visualization.
-    :param conf_th: The confidence threshold used to filter negatives.
-    :param eval_range: Range in meters beyond which boxes are ignored.
-    :param verbose: Whether to print to stdout.
-    :param savepath: If given, saves the the rendering here instead of displaying.
-    """
-    # Retrieve sensor & pose records.
-    sample_rec = nusc.get('sample', sample_token)
-    sd_record = nusc.get('sample_data', sample_rec['data']['LIDAR_TOP'])
-    cs_record = nusc.get('calibrated_sensor', sd_record['calibrated_sensor_token'])
-    pose_record = nusc.get('ego_pose', sd_record['ego_pose_token'])
-    # Get boxes.
-    boxes_gt_global = gt_boxes[sample_token]
-    boxes_est_global = pred_boxes[sample_token]
-    # Map GT boxes to lidar.
-    boxes_gt = boxes_to_sensor(boxes_gt_global, pose_record, cs_record)
-    # Map EST boxes to lidar.
-    boxes_est = boxes_to_sensor(boxes_est_global, pose_record, cs_record)
-    # Add scores to EST boxes.
-    for box_est, box_est_global in zip(boxes_est, boxes_est_global):
-        box_est.score = box_est_global.detection_score
-
-    # Init axes.
-    fig, axes = plt.subplots(1, 1, figsize=(4, 4))
-    plt.xlim(xmin=-30, xmax=30)
-    plt.ylim(ymin=-30, ymax=30)
-
-    # Show Pred Map
-    result_dic = pred_data['map_results'][sample_token]['vectors']
-
-    for vector in result_dic:
-        if vector['confidence_level'] < 0.6:
-            continue
-        pred_pts_3d = vector['pts']
-        pred_label_3d = vector['type']
-        pts_x = np.array([pt[0] for pt in pred_pts_3d])
-        pts_y = np.array([pt[1] for pt in pred_pts_3d])
-
-        axes.plot(pts_x, pts_y, color=colors_plt[pred_label_3d],linewidth=1,alpha=0.8,zorder=-1)
-        axes.scatter(pts_x, pts_y, color=colors_plt[pred_label_3d],s=1,alpha=0.8,zorder=-1)  
-
-    # ignore_list = ['barrier', 'motorcycle', 'bicycle', 'traffic_cone']
-    ignore_list = ['barrier', 'bicycle', 'traffic_cone']
-
-    # Show Pred boxes.
-    for i, box in enumerate(boxes_est):
-        if box.name in ignore_list:
-            continue
-        # Show only predictions with a high score.
-        assert not np.isnan(box.score), 'Error: Box score cannot be NaN!'
-        if box.score < conf_th or abs(box.center[0]) > 15 or abs(box.center[1]) > 30:
-            continue
-        box.render(axes, view=np.eye(4), colors=('tomato', 'tomato', 'tomato'), linewidth=1, box_idx=None)
-        # if box.name in ['pedestrian']:
-        #     continue
-        if traj_use_perstep_offset:
-            mode_idx = [0, 1, 2, 3, 4, 5]
-            box.render_fut_trajs_grad_color(axes, linewidth=1, mode_idx=mode_idx, fut_ts=6, cmap='autumn')
-        else:
-            box.render_fut_trajs_coords(axes, color='tomato', linewidth=1)
-
-    # Show Planning.
-    axes.plot([-0.9, -0.9], [-2, 2], color='mediumseagreen', linewidth=1, alpha=0.8)
-    axes.plot([-0.9, 0.9], [2, 2], color='mediumseagreen', linewidth=1, alpha=0.8)
-    axes.plot([0.9, 0.9], [2, -2], color='mediumseagreen', linewidth=1, alpha=0.8)
-    axes.plot([0.9, -0.9], [-2, -2], color='mediumseagreen', linewidth=1, alpha=0.8)
-    axes.plot([0.0, 0.0], [0.0, 2], color='mediumseagreen', linewidth=1, alpha=0.8)
-    plan_cmd = np.argmax(pred_data['plan_results'][sample_token][1][0,0,0])
-    plan_traj = pred_data['plan_results'][sample_token][0][plan_cmd]
-    plan_traj[abs(plan_traj) < 0.01] = 0.0
-    plan_traj = plan_traj.cumsum(axis=0)
-    plan_traj = np.concatenate((np.zeros((1, plan_traj.shape[1])), plan_traj), axis=0)
-    plan_traj = np.stack((plan_traj[:-1], plan_traj[1:]), axis=1)
-
-    plan_vecs = None
-    for i in range(plan_traj.shape[0]):
-        plan_vec_i = plan_traj[i]
-        x_linspace = np.linspace(plan_vec_i[0, 0], plan_vec_i[1, 0], 51)
-        y_linspace = np.linspace(plan_vec_i[0, 1], plan_vec_i[1, 1], 51)
-        xy = np.stack((x_linspace, y_linspace), axis=1)
-        xy = np.stack((xy[:-1], xy[1:]), axis=1)
-        if plan_vecs is None:
-            plan_vecs = xy
-        else:
-            plan_vecs = np.concatenate((plan_vecs, xy), axis=0)
-
-    cmap = 'winter'
-    y = np.sin(np.linspace(1/2*np.pi, 3/2*np.pi, 301))
-    colors = color_map(y[:-1], cmap)
-    line_segments = LineCollection(plan_vecs, colors=colors, linewidths=1, linestyles='solid', cmap=cmap)
-    axes.add_collection(line_segments)
-
-    axes.axes.xaxis.set_ticks([])
-    axes.axes.yaxis.set_ticks([])
-    axes.axis('off')
-    fig.set_tight_layout(True)
-    fig.canvas.draw()
-    plt.savefig(savepath+'/bev_pred.png', bbox_inches='tight', dpi=200)
-    plt.close()
 
 
 def obtain_sensor2top(nusc,
@@ -669,6 +489,247 @@ def obtain_sensor2top(nusc,
     sensor2lidar_translation = T
 
     return sensor2lidar_rotation, sensor2lidar_translation
+
+
+def visualize_sample(nusc: NuScenes,
+                     sample_token: str,
+                     gt_boxes: EvalBoxes,
+                     pred_boxes: EvalBoxes,
+                     nsweeps: int = 1,
+                     conf_th: float = 0.4,
+                     pc_range: list = [-30.0, -30.0, -4.0, 30.0, 30.0, 4.0],
+                     verbose: bool = True,
+                     savepath: str = None,
+                     traj_use_perstep_offset: bool = True,
+                     data_root='data/nuscenes_mini/nuscenes_mini',
+                     map_pc_range: list = [-15.0, -30.0, -4.0, 15.0, 30.0, 4.0],
+                     padding_value=-10000,
+                     map_classes=['divider', 'ped_crossing', 'boundary'],
+                     map_fixed_ptsnum_per_line=20,
+                     gt_format=['fixed_num_pts'],
+                     colors_plt=['cornflowerblue', 'royalblue', 'slategrey'],
+                     pred_data=None) -> None:
+    """
+    Visualizes a sample from BEV with annotations and detection results.
+    :param nusc: NuScenes object.
+    :param sample_token: The nuScenes sample token.
+    :param gt_boxes: Ground truth boxes grouped by sample.
+    :param pred_boxes: Prediction grouped by sample.
+    :param nsweeps: Number of sweeps used for lidar visualization.
+    :param conf_th: The confidence threshold used to filter negatives.
+    :param eval_range: Range in meters beyond which boxes are ignored.
+    :param verbose: Whether to print to stdout.
+    :param savepath: If given, saves the the rendering here instead of displaying.
+    """
+    # Retrieve sensor & pose records.
+    sample_rec = nusc.get('sample', sample_token)
+    sd_record = nusc.get('sample_data', sample_rec['data']['LIDAR_TOP'])
+    cs_record = nusc.get('calibrated_sensor', sd_record['calibrated_sensor_token'])
+    pose_record = nusc.get('ego_pose', sd_record['ego_pose_token'])
+    # Get boxes.
+    boxes_gt_global = gt_boxes[sample_token]
+    boxes_est_global = pred_boxes[sample_token]
+    # Map GT boxes to lidar.
+    boxes_gt = boxes_to_sensor(boxes_gt_global, pose_record, cs_record)
+    # Map EST boxes to lidar.
+    boxes_est = boxes_to_sensor(boxes_est_global, pose_record, cs_record)
+    # Add scores to EST boxes.
+    for box_est, box_est_global in zip(boxes_est, boxes_est_global):
+        box_est.score = box_est_global.detection_score
+
+    # Init axes.
+    fig, axes = plt.subplots(1, 1, figsize=(4, 4))
+    plt.xlim(xmin=-30, xmax=30)
+    plt.ylim(ymin=-30, ymax=30)
+
+    vis_mode = 'gt'
+
+    if vis_mode == 'gt':
+        # GT Map
+        gt_vec_maps = get_gt_vec_maps(sample_token)
+        gt_vec_list = []
+        gt_labels = gt_vec_maps[1].numpy()
+        gt_vecs = gt_vec_maps[0].instance_list
+        for i, (gt_label, gt_vec) in enumerate(zip(gt_labels, gt_vecs)):
+            name = MAPCLASSES[gt_label]
+            anno = dict(
+                pts=np.array(list(gt_vec.coords)),
+                pts_num=len(list(gt_vec.coords)),
+                cls_name=name,
+                type=gt_label,
+            )
+            gt_vec_list.append(anno)
+
+        for vector in gt_vec_list:
+            # if vector['confidence_level'] < 0.6:
+            #     continue
+            pred_pts_3d = vector['pts']
+            pred_label_3d = vector['type']
+            pts_x = np.array([pt[0] for pt in pred_pts_3d])
+            pts_y = np.array([pt[1] for pt in pred_pts_3d])
+
+            # pred_label_3d = pred_label_3d % 3
+
+            axes.plot(pts_x, pts_y, color=colors_plt[pred_label_3d], linewidth=1, alpha=0.8, zorder=-1)
+            axes.scatter(pts_x, pts_y, color=colors_plt[pred_label_3d], s=1, alpha=0.8, zorder=-1)
+            # plt.show()
+        # ignore_list = ['barrier', 'motorcycle', 'bicycle', 'traffic_cone']
+        ignore_list = ['barrier', 'bicycle', 'traffic_cone']
+
+        # Show Pred boxes.
+        for i, box in enumerate(boxes_gt):
+            if box.name in ignore_list:
+                continue
+            # Show only predictions with a high score.
+            # assert not np.isnan(box.score), 'Error: Box score cannot be NaN!'
+            # if box.score < conf_th or abs(box.center[0]) > 15 or abs(box.center[1]) > 30:
+            #     continue
+            box.render(axes, view=np.eye(4), colors=('tomato', 'tomato', 'tomato'), linewidth=1, box_idx=None)
+            # if box.name in ['pedestrian']:
+            #     continue
+            box.render_fut_trajs_coords(axes, color='tomato', linewidth=1, fut_ts=6)
+        # Show Planning.
+        axes.plot([-0.9, -0.9], [-2, 2], color='mediumseagreen', linewidth=1, alpha=0.8)
+        axes.plot([-0.9, 0.9], [2, 2], color='mediumseagreen', linewidth=1, alpha=0.8)
+        axes.plot([0.9, 0.9], [2, -2], color='mediumseagreen', linewidth=1, alpha=0.8)
+        axes.plot([0.9, -0.9], [-2, -2], color='mediumseagreen', linewidth=1, alpha=0.8)
+        axes.plot([0.0, 0.0], [0.0, 2], color='mediumseagreen', linewidth=1, alpha=0.8)
+
+    elif vis_mode == 'pred':
+        # Show Pred Map
+        result_dic = pred_data['map_results'][sample_token]['vectors']
+
+        for vector in result_dic:
+            if vector['confidence_level'] < 0.6:
+                continue
+            pred_pts_3d = vector['pts']
+            pred_label_3d = vector['type']
+            pts_x = np.array([pt[0] for pt in pred_pts_3d])
+            pts_y = np.array([pt[1] for pt in pred_pts_3d])
+
+            # pred_label_3d = pred_label_3d % 3
+
+            axes.plot(pts_x, pts_y, color=colors_plt[pred_label_3d], linewidth=1, alpha=0.8, zorder=-1)
+            axes.scatter(pts_x, pts_y, color=colors_plt[pred_label_3d], s=1, alpha=0.8, zorder=-1)
+            # plt.show()
+        # ignore_list = ['barrier', 'motorcycle', 'bicycle', 'traffic_cone']
+        ignore_list = ['barrier', 'bicycle', 'traffic_cone']
+
+        # Show Pred boxes.
+        for i, box in enumerate(boxes_est):
+            if box.name in ignore_list:
+                continue
+            # Show only predictions with a high score.
+            assert not np.isnan(box.score), 'Error: Box score cannot be NaN!'
+            if box.score < conf_th or abs(box.center[0]) > 15 or abs(box.center[1]) > 30:
+                continue
+            box.render(axes, view=np.eye(4), colors=('tomato', 'tomato', 'tomato'), linewidth=1, box_idx=None)
+            # if box.name in ['pedestrian']:
+            #     continue
+            if traj_use_perstep_offset:
+                mode_idx = [0, 1, 2, 3, 4, 5]
+                box.render_fut_trajs_grad_color(axes, linewidth=1, mode_idx=mode_idx, fut_ts=6, cmap='autumn')
+            else:
+                box.render_fut_trajs_coords(axes, color='tomato', linewidth=1)
+
+        # Show Planning.
+        axes.plot([-0.9, -0.9], [-2, 2], color='mediumseagreen', linewidth=1, alpha=0.8)
+        axes.plot([-0.9, 0.9], [2, 2], color='mediumseagreen', linewidth=1, alpha=0.8)
+        axes.plot([0.9, 0.9], [2, -2], color='mediumseagreen', linewidth=1, alpha=0.8)
+        axes.plot([0.9, -0.9], [-2, -2], color='mediumseagreen', linewidth=1, alpha=0.8)
+        axes.plot([0.0, 0.0], [0.0, 2], color='mediumseagreen', linewidth=1, alpha=0.8)
+        plan_cmd = np.argmax(pred_data['plan_results'][sample_token][1][0, 0, 0])
+        plan_traj = pred_data['plan_results'][sample_token][0][plan_cmd]
+        plan_traj[abs(plan_traj) < 0.01] = 0.0
+        plan_traj = plan_traj.cumsum(axis=0)
+        plan_traj = np.concatenate((np.zeros((1, plan_traj.shape[1])), plan_traj), axis=0)
+        plan_traj = np.stack((plan_traj[:-1], plan_traj[1:]), axis=1)
+
+        plan_vecs = None
+        for i in range(plan_traj.shape[0]):
+            plan_vec_i = plan_traj[i]
+            x_linspace = np.linspace(plan_vec_i[0, 0], plan_vec_i[1, 0], 51)
+            y_linspace = np.linspace(plan_vec_i[0, 1], plan_vec_i[1, 1], 51)
+            xy = np.stack((x_linspace, y_linspace), axis=1)
+            xy = np.stack((xy[:-1], xy[1:]), axis=1)
+            if plan_vecs is None:
+                plan_vecs = xy
+            else:
+                plan_vecs = np.concatenate((plan_vecs, xy), axis=0)
+
+        cmap = 'winter'
+        y = np.sin(np.linspace(1 / 2 * np.pi, 3 / 2 * np.pi, 301))
+        colors = color_map(y[:-1], cmap)
+        line_segments = LineCollection(plan_vecs, colors=colors, linewidths=1, linestyles='solid', cmap=cmap)
+        axes.add_collection(line_segments)
+    else:
+        raise "Error!"
+
+    axes.axes.xaxis.set_ticks([])
+    axes.axes.yaxis.set_ticks([])
+    axes.axis('off')
+    fig.set_tight_layout(True)
+    fig.canvas.draw()
+    plt.savefig(savepath + '/bev_pred.png', bbox_inches='tight', dpi=200)
+    plt.close()
+
+
+def lidiar_render(sample_token, data, out_path=None, out_name=None, traj_use_perstep_offset=True):
+    bbox_gt_list = []
+    bbox_pred_list = []
+    sample_rec = nusc.get('sample', sample_token)
+    anns = sample_rec['anns']
+    sd_record = nusc.get('sample_data', sample_rec['data']['LIDAR_TOP'])
+    cs_record = nusc.get('calibrated_sensor', sd_record['calibrated_sensor_token'])
+    pose_record = nusc.get('ego_pose', sd_record['ego_pose_token'])
+
+    for ann in anns:
+        content = nusc.get('sample_annotation', ann)
+        gt_fut_trajs, gt_fut_masks = get_gt_fut_trajs(
+            nusc=nusc, anno=content, cs_record=cs_record,
+            pose_record=pose_record, fut_ts=6
+        )
+        try:
+            bbox_gt_list.append(CustomDetectionBox(
+                sample_token=content['sample_token'],
+                translation=tuple(content['translation']),
+                size=tuple(content['size']),
+                rotation=tuple(content['rotation']),
+                velocity=nusc.box_velocity(content['token'])[:2],
+                fut_trajs=tuple(gt_fut_trajs),
+                ego_translation=(0.0, 0.0, 0.0) if 'ego_translation' not in content
+                else tuple(content['ego_translation']),
+                num_pts=-1 if 'num_pts' not in content else int(content['num_pts']),
+                detection_name=category_to_detection_name(content['category_name']),
+                detection_score=-1.0 if 'detection_score' not in content else float(content['detection_score']),
+                attribute_name=''))
+        except:
+            pass
+
+    bbox_anns = data['results'][sample_token]
+    for content in bbox_anns:
+        bbox_pred_list.append(CustomDetectionBox(
+            sample_token=content['sample_token'],
+            translation=tuple(content['translation']),
+            size=tuple(content['size']),
+            rotation=tuple(content['rotation']),
+            velocity=tuple(content['velocity']),
+            fut_trajs=tuple(content['fut_traj']),
+            ego_translation=(0.0, 0.0, 0.0) if 'ego_translation' not in content
+            else tuple(content['ego_translation']),
+            num_pts=-1 if 'num_pts' not in content else int(content['num_pts']),
+            detection_name=content['detection_name'],
+            detection_score=-1.0 if 'detection_score' not in content else float(content['detection_score']),
+            attribute_name=content['attribute_name']))
+    gt_annotations = EvalBoxes()
+    pred_annotations = EvalBoxes()
+    gt_annotations.add_boxes(sample_token, bbox_gt_list)
+    pred_annotations.add_boxes(sample_token, bbox_pred_list)
+    # print('green is ground truth')
+    # print('blue is the predited result')
+    visualize_sample(nusc, sample_token, gt_annotations, pred_annotations,
+                     savepath=out_path, traj_use_perstep_offset=traj_use_perstep_offset, pred_data=data)
+
 
 def render_sample_data(
         sample_toekn: str,
@@ -736,12 +797,12 @@ if __name__ == '__main__':
     bevformer_results = mmcv.load(inference_result_path)
     sample_token_list = list(bevformer_results['results'].keys())
 
-    nusc = NuScenes(version='v1.0-trainval', dataroot='./data/nuscenes', verbose=True)
-    
+    nusc = NuScenes(version='v1.0-mini', dataroot='./data/nuscenes_mini/nuscenes_mini', verbose=True)
+
     imgs = []
     fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
     video_path = osp.join(out_path, 'vis.mp4')
-    video = cv2.VideoWriter(video_path, fourcc, 10, (2933, 800), True)
+    video = cv2.VideoWriter(video_path, fourcc, 2, (2933, 800), True)
     for id in tqdm(range(len(sample_token_list))):
         mmcv.mkdir_or_exist(out_path)
         render_sample_data(sample_token_list[id],
@@ -774,13 +835,15 @@ if __name__ == '__main__':
                 boxes = [Box(record['translation'], record['size'], Quaternion(record['rotation']),
                             name=record['detection_name'], token='predicted') for record in
                         bevformer_results['results'][sample_token]]
+
                 data_path, boxes_pred, camera_intrinsic = get_predicted_data(sample_data_token,
                                                                             box_vis_level=BoxVisibility.ANY,
                                                                             pred_anns=boxes)
-                _, boxes_gt, _ = nusc.get_sample_data(sample_data_token, box_vis_level=BoxVisibility.ANY)
+
+                # _, boxes_gt, _ = nusc.get_sample_data(sample_data_token, box_vis_level=BoxVisibility.ANY)
 
                 data = Image.open(data_path)
- 
+
                 # Show image.
                 _, ax = plt.subplots(1, 1, figsize=(6, 12))
                 ax.imshow(data)
@@ -888,15 +951,15 @@ if __name__ == '__main__':
         # Line thickness of 2 px
         thickness = 3
         # org
-        org = (20, 40)      
+        org = (20, 40)
         # Blue color in BGR
         color = (0, 0, 0)
         # Using cv2.putText() method
-        pred_img = cv2.putText(pred_img, 'BEV', org, font, 
+        pred_img = cv2.putText(pred_img, 'BEV', org, font,
                         fontScale, color, thickness, cv2.LINE_AA)
-        pred_img = cv2.putText(pred_img, plan_cmd_str, (20, 770), font, 
+        pred_img = cv2.putText(pred_img, plan_cmd_str, (20, 770), font,
                         fontScale, color, thickness, cv2.LINE_AA)
-        
+
         sample_img = pred_img
         cam_img_top = cv2.hconcat([cam_imgs[0], cam_imgs[1], cam_imgs[2]])
         cam_img_down = cv2.hconcat([cam_imgs[3], cam_imgs[4], cam_imgs[5]])
@@ -906,6 +969,6 @@ if __name__ == '__main__':
         vis_img = cv2.hconcat([cam_img, sample_img])
 
         video.write(vis_img)
-    
+
     video.release()
     cv2.destroyAllWindows()

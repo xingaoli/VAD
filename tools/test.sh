@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=0 python tools/test.py projects/configs/VAD/VAD_base_e2e.py ckpts/VAD_base.pth --launcher none --eval bbox --tmpdir tmp

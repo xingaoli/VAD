@@ -127,3 +127,12 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+.idea/
+ckpts/
+data/
+mmdetection3d/
+output/
+projects/configs/VAD/VAD_base_e2e.py
+
+
